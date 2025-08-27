@@ -1,34 +1,41 @@
 from fastapi import FastAPI, Response, Request
 from twilio.twiml.voice_response import VoiceResponse, Gather
+from twilio.rest import Client
 from openai import OpenAI
 import os, time, requests, re
+from urllib.parse import quote_plus
 
 app = FastAPI()
 
-# API keys
+# === API keys / config ===
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-GOOGLE_API_KEY = os.environ.get("GOOGLE_MAPS_KEY")
+GOOGLE_API_KEY = os.environ.get("google_maps_key") or os.environ.get("GOOGLE_MAPS_KEY")
 
-# Store details
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER")  # SMS-capable Twilio number (+1XXXXXXXXXX)
+
+twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN) else None
+
+# === Store details ===
 STORE_INFO = {
     "name": "CPR Cell Phone Repair",
     "city": "Myrtle Beach",
-    "address": "1000 South Commons Drive, Myrtle Beach, SC 29588",  # update with real address
+    "address": "1000 South Commons Drive, Myrtle Beach, SC 29588",
     "hours": "Monday–Saturday 9am–6pm, Sunday we are closed",
     "phone": "(843) 750-0449"
 }
 
-# Per-call session data
-call_activity = {}   # last interaction timestamp
-call_mode = {}       # "normal", "gps", "awaiting_origin"
-gps_routes = {}      # remaining GPS steps
-call_memory = {}     # short-term conversation memory
-caller_name = {}     # caller's name per call
+# === Per-call session data ===
+call_activity = {}     # last interaction timestamp
+call_mode = {}         # "normal", "awaiting_origin", "offer_sms"
+call_memory = {}       # short-term conversation memory
+caller_numbers = {}    # call_sid -> '+1XXXXXXXXXX'
+pending_maps = {}      # call_sid -> {'link': str}
 
 MAX_MEMORY = 5
 
-# === Helper functions ===
-
+# === Voice helper (slow speech) ===
 def slow_say(self, text, **kwargs):
     kwargs.setdefault("voice", "Polly.Matthew")
     self._original_say(
@@ -36,22 +43,19 @@ def slow_say(self, text, **kwargs):
         **kwargs
     )
 
-# Monkey‑patch VoiceResponse.say to always use slow mode
 VoiceResponse._original_say = VoiceResponse.say
 VoiceResponse.say = slow_say
 
+# === Memory helper ===
 def remember(call_sid, role, content):
-    """Store a message in short-term memory for this call."""
     if call_sid not in call_memory:
         call_memory[call_sid] = []
     call_memory[call_sid].append({"role": role, "content": content})
     call_memory[call_sid] = call_memory[call_sid][-MAX_MEMORY:]
 
+# === Geo helpers ===
 def geocode_address(address):
-    """Convert spoken address/landmark into lat,lng string, biased to Myrtle Beach."""
     print(f"[DEBUG] Geocoding request for: '{address}'")
-
-    # Try Geocoding API first
     geo_url = "https://maps.googleapis.com/maps/api/geocode/json"
     geo_params = {
         "address": address,
@@ -59,41 +63,25 @@ def geocode_address(address):
         "key": GOOGLE_API_KEY
     }
     r = requests.get(geo_url, params=geo_params)
-    print(f"[DEBUG] Geocoding URL: {r.url}")
     geo_data = r.json()
-    print(f"[DEBUG] Geocoding response: {geo_data}")
 
     if geo_data.get("status") == "OK" and geo_data.get("results"):
         loc = geo_data["results"][0]["geometry"]["location"]
-        coords = f"{loc['lat']},{loc['lng']}"
-        print(f"[DEBUG] Geocoding success: {coords}")
-        return coords
+        return f"{loc['lat']},{loc['lng']}"
 
-    # Fallback to Places API text search
-    print("[DEBUG] Falling back to Places API")
     places_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
     places_params = {
         "query": f"{address}, Myrtle Beach, SC",
         "key": GOOGLE_API_KEY
     }
     r = requests.get(places_url, params=places_params)
-    print(f"[DEBUG] Places URL: {r.url}")
     places_data = r.json()
-    print(f"[DEBUG] Places response: {places_data}")
-
     if places_data.get("status") == "OK" and places_data.get("results"):
         loc = places_data["results"][0]["geometry"]["location"]
-        coords = f"{loc['lat']},{loc['lng']}"
-        print(f"[DEBUG] Places success: {coords}")
-        return coords
-
-    print("[DEBUG] No coordinates found from either Geocoding or Places.")
+        return f"{loc['lat']},{loc['lng']}"
     return None
 
 def get_directions(origin, destination):
-    """Fetch directions from Google Directions API."""
-    print(f"[DEBUG] Directions request: origin={origin}, destination={destination}")
-
     url = "https://maps.googleapis.com/maps/api/directions/json"
     params = {
         "origin": origin,
@@ -103,29 +91,30 @@ def get_directions(origin, destination):
         "key": GOOGLE_API_KEY
     }
     r = requests.get(url, params=params)
-    print(f"[DEBUG] Directions URL: {r.url}")
     directions_data = r.json()
-    print(f"[DEBUG] Directions response: {directions_data}")
-
     if directions_data.get("status") == "OK" and directions_data.get("routes"):
         leg = directions_data["routes"][0]["legs"][0]
-        steps = [re.sub(r"<[^>]*>", "", s["html_instructions"]) for s in leg["steps"]]
-        print(f"[DEBUG] Directions success: {len(steps)} steps")
         return {
             "duration": leg["duration"]["text"],
-            "distance": leg["distance"]["text"],
-            "steps": steps
+            "distance": leg["distance"]["text"]
         }
-
-    print(f"[DEBUG] Directions API returned no usable route. Status: {directions_data.get('status')}")
     return None
 
+def build_maps_link(origin_coords: str, destination_addr: str) -> str:
+    origin_param = quote_plus(origin_coords)
+    dest_param = quote_plus(destination_addr)
+    return f"https://www.google.com/maps/dir/?api=1&origin={origin_param}&destination={dest_param}&travelmode=driving"
+
+# === Voice endpoints ===
 @app.post("/voice/outbound/intro")
 async def intro(request: Request):
     form = await request.form()
     call_sid = form.get("CallSid", "unknown")
+    from_number = form.get("From")
+    if from_number:
+        caller_numbers[call_sid] = from_number
     call_activity[call_sid] = time.time()
-    call_mode[call_sid] = "normal"  # start immediately in normal mode
+    call_mode[call_sid] = "normal"
     call_memory[call_sid] = []
 
     vr = VoiceResponse()
@@ -141,158 +130,113 @@ async def intro(request: Request):
     vr.append(gather)
     return Response(str(vr), media_type="application/xml")
 
-
 @app.post("/voice/outbound/process")
 async def process(request: Request):
     form = await request.form()
     call_sid = form.get("CallSid", "unknown")
+    from_number = form.get("From")
+    if from_number:
+        caller_numbers[call_sid] = from_number
+
     user_input = (form.get("SpeechResult") or "").strip()
     lower_input = user_input.lower()
     vr = VoiceResponse()
     call_activity[call_sid] = time.time()
 
-    # Exit phrases
-    exit_phrases = [
-        "thank you, bye", "thank you bye", "goodbye", "bye", "that's all", "hang up"
-    ]
-    if any(phrase in lower_input for phrase in exit_phrases):
+    # End call
+    if any(p in lower_input for p in ["thank you, bye", "thank you bye", "goodbye", "bye", "that's all", "hang up"]):
         vr.say(f"Thank you for calling {STORE_INFO['name']}. Goodbye.")
         vr.hangup()
         return Response(str(vr), media_type="application/xml")
-    # Exit phrases (end entire call)
-    exit_phrases = [
-        "thank you, bye", "thank you bye", "goodbye", "bye", "that's all", "hang up"
-    ]
 
-    # Exit GPS mode phrases (stop giving directions but keep call going)
-    exit_gps_phrases = [
-        "stop", "cancel", "exit", "i'm there", "no more directions", "end directions", "that's enough"
-    ]
+    yes_phrases = ["yes", "yeah", "yep", "sure", "please", "ok", "okay", "send it", "text me", "send me the link", "that would help"]
+    no_phrases = ["no", "nope", "not now", "don't", "do not", "i'm good", "i am good"]
 
-# Phrases that trigger next GPS step
-    next_step_phrases = [
-        "next", "next step", "what's next", "continue", "keep going", "go on", "give me the next direction"
-    ]
-    # Passive GPS mode — only respond when asked
-    if call_mode.get(call_sid) == "gps":
-        # Exit GPS mode if caller wants to stop
-        if any(phrase in lower_input for phrase in exit_gps_phrases):
-            vr.say("Okay, ending directions. Let me know if you need anything else.")
-            call_mode[call_sid] = "normal"
-            gather = Gather(
-                input="speech",
-                action="/voice/outbound/process",
-                method="POST",
-                timeout=20,
-                speech_timeout="auto"
-            )
-            vr.append(gather)
-            return Response(str(vr), media_type="application/xml")
-
-        # Give next step if requested
-        if any(phrase in lower_input for phrase in next_step_phrases):
-            steps = gps_routes.get(call_sid, [])
-            if steps:
-                vr.say(steps.pop(0))
-                gps_routes[call_sid] = steps
-                if not steps:
-                    vr.say("You have arrived at your destination. Let me know if you need anything else.")
-                    call_mode[call_sid] = "normal"
+    # Handle SMS offer response
+    if call_mode.get(call_sid) == "offer_sms":
+        if any(p in lower_input for p in yes_phrases):
+            to_number = caller_numbers.get(call_sid)
+            link_info = pending_maps.get(call_sid)
+            if to_number and link_info and twilio_client and TWILIO_FROM_NUMBER:
+                try:
+                    twilio_client.messages.create(
+                        to=to_number,
+                        from_=TWILIO_FROM_NUMBER,
+                        body=f"Directions to {STORE_INFO['name']}: {link_info['link']}"
+                    )
+                    vr.say("Sent. Tap the link in the text to open Google Maps and start navigation.")
+                except Exception as e:
+                    print(f"[ERROR] SMS send failed: {e}")
+                    vr.say("I couldn't send the text just now.")
             else:
-                vr.say("There are no more steps left. You're likely at the destination.")
-                call_mode[call_sid] = "normal"
-
-            gather = Gather(
-                input="speech",
-                action="/voice/outbound/process",
-                method="POST",
-                timeout=20,
-                speech_timeout="auto"
-            )
-            vr.append(gather)
+                vr.say("I couldn't send the text right now. Search Google Maps for our address.")
+            pending_maps.pop(call_sid, None)
+            call_mode[call_sid] = "normal"
+            g = Gather(input="speech", action="/voice/outbound/process", method="POST", timeout=20, speech_timeout="auto")
+            vr.append(g)
             return Response(str(vr), media_type="application/xml")
 
-        # If in GPS mode but caller asks something else, fall through to normal logic
+        if any(p in lower_input for p in no_phrases):
+            vr.say("Okay. If you change your mind, just say 'text me the directions'.")
+            pending_maps.pop(call_sid, None)
+            call_mode[call_sid] = "normal"
+            g = Gather(input="speech", action="/voice/outbound/process", method="POST", timeout=20, speech_timeout="auto")
+            vr.append(g)
+            return Response(str(vr), media_type="application/xml")
 
-    # Awaiting origin for GPS
+        vr.say("Sorry, I didn't catch that. Do you want me to text you the Google Maps link?")
+        g = Gather(input="speech", action="/voice/outbound/process", method="POST", timeout=20, speech_timeout="auto")
+        vr.append(g)
+        return Response(str(vr), media_type="application/xml")
+
+        # === Awaiting origin → compute ETA + offer SMS ===
     if call_mode.get(call_sid) == "awaiting_origin":
         origin_coords = geocode_address(user_input)
         if not origin_coords:
-            vr.say("I couldn't find that location. Could you try giving me a street address or another well-known place nearby?")
-            gather = Gather(
-                input="speech",
-                action="/voice/outbound/process",
-                method="POST",
-                timeout=20,
-                speech_timeout="auto"
-            )
-            vr.append(gather)
+            vr.say("I couldn't find that location. Try a street address or a well-known place nearby.")
+            g = Gather(input="speech", action="/voice/outbound/process", method="POST", timeout=20, speech_timeout="auto")
+            vr.append(g)
             return Response(str(vr), media_type="application/xml")
 
         directions = get_directions(origin_coords, STORE_INFO["address"])
-        if directions:
-            vr.say(f"It is {directions['distance']} away, about {directions['duration']} drive. Let's start directions.")
-            gps_routes[call_sid] = directions["steps"]
-            call_mode[call_sid] = "gps"
-            vr.say(gps_routes[call_sid].pop(0))
-            gather = Gather(
-                input="speech",
-                action="/voice/outbound/process",
-                method="POST",
-                timeout=20,
-                speech_timeout="auto"
-            )
-            vr.append(gather)
-        else:
+        if not directions:
             vr.say("I couldn't get directions from that location. Could you try a different starting point?")
-            gather = Gather(
-                input="speech",
-                action="/voice/outbound/process",
-                method="POST",
-                timeout=20,
-                speech_timeout="auto"
-            )
-            vr.append(gather)
+            g = Gather(input="speech", action="/voice/outbound/process", method="POST", timeout=20, speech_timeout="auto")
+            vr.append(g)
+            return Response(str(vr), media_type="application/xml")
+
+        # Speak ETA
+        vr.say(f"We are about {directions['distance']}, roughly a {directions['duration']} drive from there.")
+
+        # Store link + offer SMS
+        maps_link = build_maps_link(origin_coords, STORE_INFO["address"])
+        pending_maps[call_sid] = {"link": maps_link}
+        call_mode[call_sid] = "offer_sms"
+
+        vr.say("Would you like me to text you a Google Maps link to start navigation?")
+        g = Gather(input="speech", action="/voice/outbound/process", method="POST", timeout=20, speech_timeout="auto")
+        vr.append(g)
         return Response(str(vr), media_type="application/xml")
 
-    # === Hard-coded store info (order adjusted) ===
-    if "directions" in lower_input or "how do i get there" in lower_input:
-        vr.say("Sure, what is your starting address or location?")
-        call_mode[call_sid] = "awaiting_origin"
-        gather = Gather(
-            input="speech",
-            action="/voice/outbound/process",
-            method="POST",
-            timeout=20,
-            speech_timeout="auto"
-        )
-        vr.append(gather)
-        return Response(str(vr), media_type="application/xml")
-
-    elif "hours" in lower_input:
+    # === Main store-info intents ===
+    if re.search(r"\bhours?\b|\bwhen\s+are\s+you\s+open\b|\bwhat\s+time\s+do\s+you\b", lower_input):
         vr.say(f"Our hours are {STORE_INFO['hours']}.")
-
-    elif "address" in lower_input or "location" in lower_input:
+    elif re.search(r"(where\s+(are\s+(you|y'all)|is\s+the\s+store)\s+located)|(address)|(location)", lower_input):
         vr.say(f"We are located at {STORE_INFO['address']}.")
-
     elif re.search(r"\b(phone|number)\b", lower_input):
         vr.say(f"Our phone number is {STORE_INFO['phone']}.")
-
-    elif "landmark" in lower_input or "nearby" in lower_input or "close to" in lower_input:
+    elif re.search(r"(landmark|nearby|close\s+to|around\s+(you|there)|what'?s\s+(near|around)\s+(you|there))", lower_input):
         vr.say(
-            "We are near Goodwill and Lowes Home Improvement, "
-            "in the strip mall where Chipotle, McCalisters, Sports Clips, "
-            "and the UPS Store are all at. If that doesn't help, "
-            "the only other big landmark is that we are not far down the road "
-            "from the East Coast Honda Dealership."
+            "We are near Goodwill and Lowe's Home Improvement, in the strip mall with Chipotle, McAlister's, "
+            "Sport Clips, and the UPS Store. We're also not far down the road from East Coast Honda."
         )
-
-    # === Fallback to AI for other questions ===
+    # === AI fallback for anything else ===
     else:
         try:
             system_prompt = f"""
             You are a warm, knowledgeable receptionist for {STORE_INFO['name']} in {STORE_INFO['city']}.
-            You can chat naturally, answer open-ended repair or product questions, but DO NOT guess store details like hours, address, phone, or landmarks.
+            You can chat naturally, answer open-ended repair or product questions,
+            but DO NOT guess store details like hours, address, phone, or landmarks.
             """
             messages = [{"role": "system", "content": system_prompt}]
             if call_sid in call_memory:
@@ -307,17 +251,11 @@ async def process(request: Request):
             remember(call_sid, "user", user_input)
             remember(call_sid, "assistant", reply_text)
             vr.say(reply_text)
-        except:
+        except Exception as e:
+            print(f"[ERROR] AI fallback failed: {e}")
             vr.say("I'm having trouble responding right now. Please call again.")
 
-    # Listen again
-    gather = Gather(
-        input="speech",
-        action="/voice/outbound/process",
-        method="POST",
-        timeout=20,
-        speech_timeout="auto"
-    )
-    vr.append(gather)
-
+    # Always gather again unless the call is ending
+    g = Gather(input="speech", action="/voice/outbound/process", method="POST", timeout=20, speech_timeout="auto")
+    vr.append(g)
     return Response(str(vr), media_type="application/xml")
