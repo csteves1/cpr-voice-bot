@@ -202,11 +202,11 @@ async def process(request: Request):
 
     # === Hard-coded store info ===
     if "hours" in lower_input:
-        vr.say(f"Our hours are {STORE_INFO['9am-6pm Monday-Saturday, and closed on Sundays']}.")
+        vr.say(f"Our hours are {STORE_INFO['hours']}.")
     elif "address" in lower_input or "location" in lower_input:
-        vr.say(f"We are located at {STORE_INFO['1000 South Commons Drive Unit 103, Myrtle Beach South Carolina 29588']}.")
+        vr.say(f"We are located at {STORE_INFO['address']}.")
     elif "phone" in lower_input or "number" in lower_input:
-        vr.say(f"Our phone number is {STORE_INFO['(843) 750-0449']}.")
+        vr.say(f"Our phone number is {STORE_INFO['phone']}.")
     elif "landmark" in lower_input or "nearby" in lower_input or "close to" in lower_input:
         vr.say(
             "We are near Goodwill and Lowes Home Improvement, "
