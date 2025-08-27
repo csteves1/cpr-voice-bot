@@ -14,7 +14,7 @@ STORE_INFO = {
     "name": "CPR Cell Phone Repair",
     "city": "Myrtle Beach",
     "address": "1000 South Commons Drive, Myrtle Beach, SC 29588",  # update with real address
-    "hours": "Mon–Sat 9am–6pm, Sun we are closed",
+    "hours": "Monday–Saturday 9am–6pm, Sunday we are closed",
     "phone": "(843) 750-0449"
 }
 
@@ -205,8 +205,8 @@ async def process(request: Request):
                 timeout=20,
                 speech_timeout="auto"
     )
-        vr.append(gather)
-        return Response(str(vr), media_type="application/xml")
+            vr.append(gather)
+            return Response(str(vr), media_type="application/xml")
 
         directions = get_directions(origin_coords, STORE_INFO["address"])
         if directions:
