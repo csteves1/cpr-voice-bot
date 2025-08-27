@@ -37,8 +37,8 @@ def slow_say(self, text):
     )
 
 # Monkey‑patch VoiceResponse.say to always use slow mode
-VoiceResponse.slow_say = slow_say_method
-VoiceResponse.say = slow_say_method
+VoiceResponse.slow_say = slow_say
+VoiceResponse.say = slow_say
 
 def remember(call_sid, role, content):
     """Store a message in short-term memory for this call."""
@@ -90,8 +90,8 @@ async def intro(request: Request):
         action="/voice/outbound/process",
         method="POST",
         timeout=15,
+        speech_timeout="auto",
         
-        speech_timeout="auto"
         hints="repair, screen, battery, directions, hours, location, address, phone number, iphone, samsung, price, motorola, lg, google, pixel"
     )
     gather.say(f"Thank you for calling {STORE_INFO['name']} in {STORE_INFO['city']}. May I have your name please?")
