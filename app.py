@@ -181,7 +181,13 @@ async def process(request: Request):
         origin_coords = geocode_address(user_input)
         if not origin_coords:
             vr.say("I couldn't find that location. Could you repeat it or give me a nearby landmark?")
-            gather = Gather(input="speech", action="/voice/outbound/origin", method="POST", timeout=20, speech_timeout="auto")
+            gather = Gather(
+                input="speech",
+                action="/voice/outbound/origin",
+                method="POST",
+                timeout=20,
+                speech_timeout="auto"
+            )
             vr.append(gather)
             return Response(str(vr), media_type="application/xml")
 
@@ -192,21 +198,50 @@ async def process(request: Request):
             gps_routes[call_sid] = directions["steps"]
             call_mode[call_sid] = "gps"
             vr.say(gps_routes[call_sid].pop(0))
-            gather = Gather(input="speech", action="/voice/outbound/process", method="POST", timeout=20, speech_timeout="auto")
+            gather = Gather(
+                input="speech",
+                action="/voice/outbound/process",
+                method="POST",
+                timeout=20,
+                speech_timeout="auto"
+            )
             vr.append(gather)
         else:
             vr.say("I couldn't get directions from that location. Could you try a different starting point?")
-            gather = Gather(input="speech", action="/voice/outbound/origin", method="POST", timeout=20, speech_timeout="auto")
+            gather = Gather(
+                input="speech",
+                action="/voice/outbound/origin",
+                method="POST",
+                timeout=20,
+                speech_timeout="auto"
+            )
             vr.append(gather)
         return Response(str(vr), media_type="application/xml")
 
-    # === Hard-coded store info ===
-    if "hours" in lower_input:
+    # === Hard-coded store info (order adjusted) ===
+    # Check directions BEFORE address or phone so GPS logic takes priority
+    if "directions" in lower_input or "how do i get there" in lower_input:
+        vr.say("Sure, what is your starting address or location?")
+        call_mode[call_sid] = "awaiting_origin"
+        gather = Gather(
+            input="speech",
+            action="/voice/outbound/process",
+            method="POST",
+            timeout=20,
+            speech_timeout="auto"
+        )
+        vr.append(gather)
+        return Response(str(vr), media_type="application/xml")
+
+    elif "hours" in lower_input:
         vr.say(f"Our hours are {STORE_INFO['hours']}.")
+
     elif "address" in lower_input or "location" in lower_input:
         vr.say(f"We are located at {STORE_INFO['address']}.")
-    elif "phone" in lower_input or "number" in lower_input:
+
+    elif re.search(r"\b(phone|number)\b", lower_input):
         vr.say(f"Our phone number is {STORE_INFO['phone']}.")
+
     elif "landmark" in lower_input or "nearby" in lower_input or "close to" in lower_input:
         vr.say(
             "We are near Goodwill and Lowes Home Improvement, "
