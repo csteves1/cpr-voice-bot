@@ -91,7 +91,6 @@ async def intro(request: Request):
         method="POST",
         timeout=15,
         speech_timeout="auto",
-        
         hints="repair, screen, battery, directions, hours, location, address, phone number, iphone, samsung, price, motorola, lg, google, pixel"
     )
     gather.say(f"Thank you for calling {STORE_INFO['name']} in {STORE_INFO['city']}. May I have your name please?")
