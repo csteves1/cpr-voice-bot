@@ -137,7 +137,9 @@ async def process(request: Request):
     call_activity[call_sid] = time.time()
 
     # Exit phrases
-    exit_phrases = ["thank you, bye", "thank you bye", "goodbye", "bye", "that's all", "hang up"]
+    exit_phrases = [
+        "thank you, bye", "thank you bye", "goodbye", "bye", "that's all", "hang up"
+    ]
     if any(phrase in lower_input for phrase in exit_phrases):
         vr.say(f"Thank you for calling {STORE_INFO['name']}. Goodbye.")
         vr.hangup()
@@ -198,32 +200,28 @@ async def process(request: Request):
             vr.append(gather)
         return Response(str(vr), media_type="application/xml")
 
-    # Store info quick replies
+    # === Hard-coded store info ===
     if "hours" in lower_input:
         vr.say(f"Our hours are {STORE_INFO['hours']}.")
     elif "address" in lower_input or "location" in lower_input:
         vr.say(f"We are located at {STORE_INFO['address']}.")
     elif "phone" in lower_input or "number" in lower_input:
         vr.say(f"Our phone number is {STORE_INFO['phone']}.")
-    elif "directions" in lower_input or "how do i get there" in lower_input:
-        vr.say("Sure, what is your starting address or location?")
-        call_mode[call_sid] = "awaiting_origin"
-        gather = Gather(
-            input="speech",
-            action="/voice/outbound/process",
-            method="POST",
-            timeout=20,
-            speech_timeout="auto"
+    elif "landmark" in lower_input or "nearby" in lower_input or "close to" in lower_input:
+        vr.say(
+            "We are near Goodwill and Lowes Home Improvement, "
+            "in the strip mall where Chipotle, McCalisters, Sports Clips, "
+            "and the UPS Store are all at. If that doesn't help, "
+            "the only other big landmark is that we are not far down the road "
+            "from the East Coast Honda Dealership."
         )
-        vr.append(gather)
-        return Response(str(vr), media_type="application/xml")
+
+    # === Fallback to AI for other questions ===
     else:
-        # General AI answer
         try:
             system_prompt = f"""
             You are a warm, knowledgeable receptionist for {STORE_INFO['name']} in {STORE_INFO['city']}.
-            You can chat naturally, give store info, repair advice, or directions.
-            Always be friendly and concise, but add detail if asked.
+            You can chat naturally, answer open-ended repair or product questions, but DO NOT guess store details like hours, address, phone, or landmarks.
             """
             if caller_name.get(call_sid):
                 system_prompt += f" Address the caller by their name: {caller_name[call_sid]}."
