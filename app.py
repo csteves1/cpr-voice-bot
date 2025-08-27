@@ -48,13 +48,30 @@ def remember(call_sid, role, content):
     call_memory[call_sid] = call_memory[call_sid][-MAX_MEMORY:]
 
 def geocode_address(address):
-    """Convert spoken address/landmark into lat,lng string."""
-    url = "https://maps.googleapis.com/maps/api/geocode/json"
-    params = {"address": address, "key": GOOGLE_API_KEY}
-    r = requests.get(url, params=params).json()
-    if r.get("status") == "OK":
+    """Convert spoken address/landmark into lat,lng string, biased to Myrtle Beach."""
+    # First try Geocoding API
+    geo_url = "https://maps.googleapis.com/maps/api/geocode/json"
+    geo_params = {
+        "address": address,
+        "components": "locality:Myrtle Beach|administrative_area:SC|country:US",
+        "key": GOOGLE_API_KEY
+    }
+    r = requests.get(geo_url, params=geo_params).json()
+    if r.get("status") == "OK" and r.get("results"):
         loc = r["results"][0]["geometry"]["location"]
         return f"{loc['lat']},{loc['lng']}"
+
+    # Fallback to Places API text search
+    places_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+    places_params = {
+        "query": address + ", Myrtle Beach, SC",
+        "key": GOOGLE_API_KEY
+    }
+    r = requests.get(places_url, params=places_params).json()
+    if r.get("status") == "OK" and r.get("results"):
+        loc = r["results"][0]["geometry"]["location"]
+        return f"{loc['lat']},{loc['lng']}"
+
     return None
 
 def get_directions(origin, destination):
@@ -180,16 +197,16 @@ async def process(request: Request):
     if call_mode.get(call_sid) == "awaiting_origin":
         origin_coords = geocode_address(user_input)
         if not origin_coords:
-            vr.say("I couldn't find that location. Could you repeat it or give me a nearby landmark?")
+            vr.say("I couldn't find that location. Could you try giving me a street address or another well-known place nearby?")
             gather = Gather(
                 input="speech",
-                action="/voice/outbound/origin",
+                action="/voice/outbound/process",
                 method="POST",
                 timeout=20,
                 speech_timeout="auto"
-            )
-            vr.append(gather)
-            return Response(str(vr), media_type="application/xml")
+    )
+        vr.append(gather)
+        return Response(str(vr), media_type="application/xml")
 
         directions = get_directions(origin_coords, STORE_INFO["address"])
         if directions:
