@@ -152,6 +152,21 @@ async def process(request: Request):
     yes_phrases = ["yes", "yeah", "yep", "sure", "please", "ok", "okay", "send it", "text me", "send me the link", "that would help"]
     no_phrases = ["no", "nope", "not now", "don't", "do not", "i'm good", "i am good"]
 
+    # === Directions intent (expanded triggers) ===
+    if (
+        re.search(r"\bdirections?\b", lower_input) or
+        re.search(r"\b(i\s+need|looking\s+for|get|send|give|can\s+you\s+send\s+me)\s+directions?\b", lower_input) or
+        re.search(r"how\s+do\s+i\s+get\s+(there|to\s+you|to\s+the\s+store|to\s+your\s+location)", lower_input) or
+        re.search(r"how\s+to\s+get\s+(there|to\s+you|to\s+the\s+store)", lower_input) or
+        re.search(r"where\s+(are\s+(you|y['’]all|ya['’]ll|yall)|ya['’]ll|yall)\s+at", lower_input)
+    ):
+        vr.say("Sure, what is your starting address or location?")
+        call_mode[call_sid] = "awaiting_origin"
+        gather = Gather(input="speech", action="/voice/outbound/process",
+                        method="POST", timeout=20, speech_timeout="auto")
+        vr.append(gather)
+        return Response(str(vr), media_type="application/xml")
+
     # Handle SMS offer response
     if call_mode.get(call_sid) == "offer_sms":
         if any(p in lower_input for p in yes_phrases):
@@ -221,7 +236,7 @@ async def process(request: Request):
     # === Main store-info intents ===
     if re.search(r"\bhours?\b|\bwhen\s+are\s+you\s+open\b|\bwhat\s+time\s+do\s+you\b", lower_input):
         vr.say(f"Our hours are {STORE_INFO['hours']}.")
-    elif re.search(r"(where\s+(are\s+(you|y'all)|is\s+the\s+store)\s+located)|(address)|(location)", lower_input):
+    elif re.search(r"(where\s+(are\s+(you|y'all)|y'all|yall)|is\s+the\s+store)\s+located)|(address)|(location)", lower_input):
         vr.say(f"We are located at {STORE_INFO['address']}.")
     elif re.search(r"\b(phone|number)\b", lower_input):
         vr.say(f"Our phone number is {STORE_INFO['phone']}.")
