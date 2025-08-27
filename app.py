@@ -159,30 +159,60 @@ async def process(request: Request):
         vr.say(f"Thank you for calling {STORE_INFO['name']}. Goodbye.")
         vr.hangup()
         return Response(str(vr), media_type="application/xml")
+    # Exit phrases (end entire call)
+    exit_phrases = [
+        "thank you, bye", "thank you bye", "goodbye", "bye", "that's all", "hang up"
+    ]
 
-    # GPS mode step delivery
+    # Exit GPS mode phrases (stop giving directions but keep call going)
+    exit_gps_phrases = [
+        "stop", "cancel", "exit", "i'm there", "no more directions", "end directions", "that's enough"
+    ]
+
+# Phrases that trigger next GPS step
+    next_step_phrases = [
+        "next", "next step", "what's next", "continue", "keep going", "go on", "give me the next direction"
+    ]
+    # Passive GPS mode — only respond when asked
     if call_mode.get(call_sid) == "gps":
-        steps = gps_routes.get(call_sid, [])
-        if steps:
-            vr.say(steps.pop(0))
-            gps_routes[call_sid] = steps
+        # Exit GPS mode if caller wants to stop
+        if any(phrase in lower_input for phrase in exit_gps_phrases):
+            vr.say("Okay, ending directions. Let me know if you need anything else.")
+            call_mode[call_sid] = "normal"
+            gather = Gather(
+                input="speech",
+                action="/voice/outbound/process",
+                method="POST",
+                timeout=20,
+                speech_timeout="auto"
+            )
+            vr.append(gather)
+            return Response(str(vr), media_type="application/xml")
+
+        # Give next step if requested
+        if any(phrase in lower_input for phrase in next_step_phrases):
+            steps = gps_routes.get(call_sid, [])
             if steps:
-                gather = Gather(
-                    input="speech",
-                    action="/voice/outbound/process",
-                    method="POST",
-                    timeout=20,
-                    speech_timeout="auto"
-                )
-                vr.append(gather)
+                vr.say(steps.pop(0))
+                gps_routes[call_sid] = steps
+                if not steps:
+                    vr.say("You have arrived at your destination. Let me know if you need anything else.")
+                    call_mode[call_sid] = "normal"
             else:
-                vr.say("You have arrived at your destination. Goodbye.")
-                vr.hangup()
+                vr.say("There are no more steps left. You're likely at the destination.")
+                call_mode[call_sid] = "normal"
+
+            gather = Gather(
+                input="speech",
+                action="/voice/outbound/process",
+                method="POST",
+                timeout=20,
+                speech_timeout="auto"
+            )
+            vr.append(gather)
             return Response(str(vr), media_type="application/xml")
-        else:
-            vr.say("No more directions available. Goodbye.")
-            vr.hangup()
-            return Response(str(vr), media_type="application/xml")
+
+        # If in GPS mode but caller asks something else, fall through to normal logic
 
     # Awaiting origin for GPS
     if call_mode.get(call_sid) == "awaiting_origin":
