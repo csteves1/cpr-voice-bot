@@ -122,7 +122,7 @@ async def intro(request: Request):
         input="speech",
         action="/voice/outbound/process",
         method="POST",
-        timeout=15,
+        timeout=10,
         speech_timeout="auto",
         hints="repair, screen, battery, directions, hours, location, address, phone number, iphone, samsung, price, motorola, lg, google, pixel"
     )
@@ -238,7 +238,7 @@ async def process(request: Request):
         vr.say(f"Our hours are {STORE_INFO['hours']}.")
     elif re.search(r"((where\s+(are\s+(you|y['’]all|ya['’]ll|yall)|y['’]all|ya['’]ll|yall)\s+at)|(is\s+the\s+store\s+located)|(address)|(location))", lower_input):
         vr.say(f"We are located at {STORE_INFO['address']}.")
-    elif re.search(r"\b(phone|number)\b", lower_input):
+    elif re.search(r"\b(what(\s+is)?\s+(your|the)\s+)?(phone(\s+number)?|number)\b", lower_input):
         vr.say(f"Our phone number is {STORE_INFO['phone']}.")
     elif re.search(r"(landmark|nearby|close\s+to|around\s+(you|there)|what'?s\s+(near|around)\s+(you|there))", lower_input):
         vr.say(
@@ -247,11 +247,27 @@ async def process(request: Request):
         )
     # === AI fallback for anything else ===
     else:
+        # Domain guard BEFORE hitting OpenAI
+        repair_keywords = [
+            "repair", "screen", "battery", "cracked", "broken",
+            "device", "phone", "tablet", "hours", "address",
+            "location", "directions", "price", "quote", "appointment"
+        ]
+        if not any(term in lower_input for term in repair_keywords):
+            vr.say("I can help with CPR Cell Phone Repair questions like repairs, pricing, or booking. Is your question about a device or repair service?")
+            g = Gather(input="speech", action="/voice/outbound/process", method="POST", timeout=20, speech_timeout="auto")
+            vr.append(g)
+            return Response(str(vr), media_type="application/xml")
+
         try:
             system_prompt = f"""
             You are a warm, knowledgeable receptionist for {STORE_INFO['name']} in {STORE_INFO['city']}.
             You can chat naturally, answer open-ended repair or product questions,
-            but DO NOT guess store details like hours, address, phone, or landmarks.
+            but DO NOT guess store details like hours, address, phone, or landmarks. 
+            If asked anything unrelated, politely say you don't know and steer back to repairs or store info.
+            Do NOT answer general knowledge or unrelated trivia. If asked about services we offer, answer in 1 to 3 clear sentences.
+            Avoid long explanations, technical deep dives, or repair tutorials unless explicitly asked.
+            Always stay on CPR Cell Phone Repair topics.
             """
             messages = [{"role": "system", "content": system_prompt}]
             if call_sid in call_memory:
