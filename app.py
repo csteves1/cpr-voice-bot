@@ -13,7 +13,7 @@ GOOGLE_API_KEY = os.environ.get("GOOGLE_MAPS_KEY")
 STORE_INFO = {
     "name": "CPR Cell Phone Repair",
     "city": "Myrtle Beach",
-    "address": "1000 South Commons Drive Unit 103, Myrtle Beach, SC 29577",  # update with real address
+    "address": "1000 South Commons Drive, Myrtle Beach, SC 29588",  # update with real address
     "hours": "Mon–Sat 9am–6pm, Sun we are closed",
     "phone": "(843) 750-0449"
 }
@@ -27,6 +27,19 @@ caller_name = {}     # caller's name per call
 
 MAX_MEMORY = 5
 
+# === Helper functions ===
+
+def slow_say(self, text):
+    """Speak slightly slower with a consistent voice everywhere."""
+    self.say(
+        f'<speak><prosody rate="90%">{text}</prosody></speak>',
+        voice="Polly.Matthew"
+    )
+
+# Monkey‑patch VoiceResponse.say to always use slow mode
+VoiceResponse.slow_say = slow_say_method
+VoiceResponse.say = slow_say_method
+
 def remember(call_sid, role, content):
     """Store a message in short-term memory for this call."""
     if call_sid not in call_memory:
@@ -34,14 +47,20 @@ def remember(call_sid, role, content):
     call_memory[call_sid].append({"role": role, "content": content})
     call_memory[call_sid] = call_memory[call_sid][-MAX_MEMORY:]
 
+def geocode_address(address):
+    """Convert spoken address/landmark into lat,lng string."""
+    url = "https://maps.googleapis.com/maps/api/geocode/json"
+    params = {"address": address, "key": GOOGLE_API_KEY}
+    r = requests.get(url, params=params).json()
+    if r.get("status") == "OK":
+        loc = r["results"][0]["geometry"]["location"]
+        return f"{loc['lat']},{loc['lng']}"
+    return None
+
 def get_directions(origin, destination):
     """Fetch directions from Google Directions API."""
     url = "https://maps.googleapis.com/maps/api/directions/json"
-    params = {
-        "origin": origin,
-        "destination": destination,
-        "key": GOOGLE_API_KEY
-    }
+    params = {"origin": origin, "destination": destination, "key": GOOGLE_API_KEY}
     r = requests.get(url, params=params).json()
     if r.get("status") == "OK":
         leg = r["routes"][0]["legs"][0]
@@ -58,11 +77,47 @@ async def intro(request: Request):
     form = await request.form()
     call_sid = form.get("CallSid", "unknown")
     call_activity[call_sid] = time.time()
-    call_mode[call_sid] = "normal"
+    call_mode[call_sid] = "awaiting_name" #start by asking for name
+    
     call_memory[call_sid] = []
     caller_name[call_sid] = None
 
+
+
     vr = VoiceResponse()
+    gather = Gather(
+        input="speech",
+        action="/voice/outbound/process",
+        method="POST",
+        timeout=15,
+        
+        speech_timeout="auto"
+        hints="repair, screen, battery, directions, hours, location, address, phone number, iphone, samsung, price, motorola, lg, google, pixel"
+    )
+    gather.say(f"Thank you for calling {STORE_INFO['name']} in {STORE_INFO['city']}. May I have your name please?")
+    vr.append(gather)
+    return Response(str(vr), media_type="application/xml")
+
+@app.post("/voice/outbound/name")
+async def get_name(request: Request):
+    form = await request.form()
+    call_sid = form.get("CallSid", "unknown")
+    name_input = (form.get("SpeechResult") or "").strip()
+    vr = VoiceResponse()
+
+    if name_input:
+        # Try to pull a clean first name
+        match = re.search(r"(?:my name is )?(\w+)", name_input.lower())
+        if match:
+            caller_name[call_sid] = match.group(1).capitalize()
+            vr.say(f"Nice to meet you, {caller_name[call_sid]}. How can I help you today?")
+        else:
+            vr.say("Sorry, I didn’t catch that name clearly. How can I help you today?")
+    else:
+        vr.say("No problem, how can I help you today?")
+
+    # Switch to normal processing
+    call_mode[call_sid] = "normal"
     gather = Gather(
         input="speech",
         action="/voice/outbound/process",
@@ -70,7 +125,6 @@ async def intro(request: Request):
         timeout=20,
         speech_timeout="auto"
     )
-    gather.say(f"Thank you for calling {STORE_INFO['name']} in {STORE_INFO['city']}. How can I help you today?")
     vr.append(gather)
     return Response(str(vr), media_type="application/xml")
 
@@ -91,10 +145,11 @@ async def process(request: Request):
         return Response(str(vr), media_type="application/xml")
 
     # Name detection
-    name_match = re.search(r"my name is (\w+)", lower_input)
-    if name_match:
-        caller_name[call_sid] = name_match.group(1).capitalize()
-        vr.say(f"Nice to meet you, {caller_name[call_sid]}.")
+    if caller_name.get(call_sid) is None:
+        name_match = re.search(r"my name is (\w+)", lower_input)
+        if name_match:
+            caller_name[call_sid] = name_match.group(1).capitalize()
+            vr.say(f"Thanks, {caller_name[call_sid]}.")
 
     # GPS mode step delivery
     if call_mode.get(call_sid) == "gps":
@@ -122,24 +177,26 @@ async def process(request: Request):
 
     # Awaiting origin for GPS
     if call_mode.get(call_sid) == "awaiting_origin":
-        origin_addr = user_input
-        directions = get_directions(origin_addr, STORE_INFO["address"])
+        origin_coords = geocode_address(user_input)
+        if not origin_coords:
+            vr.say("I couldn't find that location. Could you repeat it or give me a nearby landmark?")
+            gather = Gather(input="speech", action="/voice/outbound/origin", method="POST", timeout=20, speech_timeout="auto")
+            vr.append(gather)
+            return Response(str(vr), media_type="application/xml")
+
+        directions = get_directions(origin_coords, STORE_INFO["address"])
         if directions:
             name_part = f"{caller_name[call_sid]}, " if caller_name.get(call_sid) else ""
             vr.say(f"{name_part}It is {directions['distance']} away, about {directions['duration']} drive. Let's start directions.")
             gps_routes[call_sid] = directions["steps"]
             call_mode[call_sid] = "gps"
             vr.say(gps_routes[call_sid].pop(0))
-            gather = Gather(
-                input="speech",
-                action="/voice/outbound/process",
-                method="POST",
-                timeout=20,
-                speech_timeout="auto"
-            )
+            gather = Gather(input="speech", action="/voice/outbound/process", method="POST", timeout=20, speech_timeout="auto")
             vr.append(gather)
         else:
-            vr.say("Sorry, I couldn't get directions from that location.")
+            vr.say("I couldn't get directions from that location. Could you try a different starting point?")
+            gather = Gather(input="speech", action="/voice/outbound/origin", method="POST", timeout=20, speech_timeout="auto")
+            vr.append(gather)
         return Response(str(vr), media_type="application/xml")
 
     # Store info quick replies
