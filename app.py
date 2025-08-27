@@ -49,44 +49,75 @@ def remember(call_sid, role, content):
 
 def geocode_address(address):
     """Convert spoken address/landmark into lat,lng string, biased to Myrtle Beach."""
-    # First try Geocoding API
+    print(f"[DEBUG] Geocoding request for: '{address}'")
+
+    # Try Geocoding API first
     geo_url = "https://maps.googleapis.com/maps/api/geocode/json"
     geo_params = {
         "address": address,
         "components": "locality:Myrtle Beach|administrative_area:SC|country:US",
         "key": GOOGLE_API_KEY
     }
-    r = requests.get(geo_url, params=geo_params).json()
-    if r.get("status") == "OK" and r.get("results"):
-        loc = r["results"][0]["geometry"]["location"]
-        return f"{loc['lat']},{loc['lng']}"
+    r = requests.get(geo_url, params=geo_params)
+    print(f"[DEBUG] Geocoding URL: {r.url}")
+    geo_data = r.json()
+    print(f"[DEBUG] Geocoding response: {geo_data}")
+
+    if geo_data.get("status") == "OK" and geo_data.get("results"):
+        loc = geo_data["results"][0]["geometry"]["location"]
+        coords = f"{loc['lat']},{loc['lng']}"
+        print(f"[DEBUG] Geocoding success: {coords}")
+        return coords
 
     # Fallback to Places API text search
+    print("[DEBUG] Falling back to Places API")
     places_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
     places_params = {
-        "query": address + ", Myrtle Beach, SC",
+        "query": f"{address}, Myrtle Beach, SC",
         "key": GOOGLE_API_KEY
     }
-    r = requests.get(places_url, params=places_params).json()
-    if r.get("status") == "OK" and r.get("results"):
-        loc = r["results"][0]["geometry"]["location"]
-        return f"{loc['lat']},{loc['lng']}"
+    r = requests.get(places_url, params=places_params)
+    print(f"[DEBUG] Places URL: {r.url}")
+    places_data = r.json()
+    print(f"[DEBUG] Places response: {places_data}")
 
+    if places_data.get("status") == "OK" and places_data.get("results"):
+        loc = places_data["results"][0]["geometry"]["location"]
+        coords = f"{loc['lat']},{loc['lng']}"
+        print(f"[DEBUG] Places success: {coords}")
+        return coords
+
+    print("[DEBUG] No coordinates found from either Geocoding or Places.")
     return None
 
 def get_directions(origin, destination):
     """Fetch directions from Google Directions API."""
+    print(f"[DEBUG] Directions request: origin={origin}, destination={destination}")
+
     url = "https://maps.googleapis.com/maps/api/directions/json"
-    params = {"origin": origin, "destination": destination, "key": GOOGLE_API_KEY}
-    r = requests.get(url, params=params).json()
-    if r.get("status") == "OK":
-        leg = r["routes"][0]["legs"][0]
+    params = {
+        "origin": origin,
+        "destination": destination,
+        "mode": "driving",
+        "region": "us",
+        "key": GOOGLE_API_KEY
+    }
+    r = requests.get(url, params=params)
+    print(f"[DEBUG] Directions URL: {r.url}")
+    directions_data = r.json()
+    print(f"[DEBUG] Directions response: {directions_data}")
+
+    if directions_data.get("status") == "OK" and directions_data.get("routes"):
+        leg = directions_data["routes"][0]["legs"][0]
         steps = [re.sub(r"<[^>]*>", "", s["html_instructions"]) for s in leg["steps"]]
+        print(f"[DEBUG] Directions success: {len(steps)} steps")
         return {
             "duration": leg["duration"]["text"],
             "distance": leg["distance"]["text"],
             "steps": steps
         }
+
+    print(f"[DEBUG] Directions API returned no usable route. Status: {directions_data.get('status')}")
     return None
 
 @app.post("/voice/outbound/intro")
@@ -94,12 +125,8 @@ async def intro(request: Request):
     form = await request.form()
     call_sid = form.get("CallSid", "unknown")
     call_activity[call_sid] = time.time()
-    call_mode[call_sid] = "awaiting_name" #start by asking for name
-    
+    call_mode[call_sid] = "normal"  # start immediately in normal mode
     call_memory[call_sid] = []
-    caller_name[call_sid] = None
-
-
 
     vr = VoiceResponse()
     gather = Gather(
@@ -110,39 +137,10 @@ async def intro(request: Request):
         speech_timeout="auto",
         hints="repair, screen, battery, directions, hours, location, address, phone number, iphone, samsung, price, motorola, lg, google, pixel"
     )
-    gather.say(f"Thank you for calling {STORE_INFO['name']} in {STORE_INFO['city']}. May I have your name please?")
+    gather.say(f"Thank you for calling {STORE_INFO['name']} in {STORE_INFO['city']}. How can I help you today?")
     vr.append(gather)
     return Response(str(vr), media_type="application/xml")
 
-@app.post("/voice/outbound/name")
-async def get_name(request: Request):
-    form = await request.form()
-    call_sid = form.get("CallSid", "unknown")
-    name_input = (form.get("SpeechResult") or "").strip()
-    vr = VoiceResponse()
-
-    if name_input:
-        # Try to pull a clean first name
-        match = re.search(r"(?:my name is )?(\w+)", name_input.lower())
-        if match:
-            caller_name[call_sid] = match.group(1).capitalize()
-            vr.say(f"Nice to meet you, {caller_name[call_sid]}. How can I help you today?")
-        else:
-            vr.say("Sorry, I didn’t catch that name clearly. How can I help you today?")
-    else:
-        vr.say("No problem, how can I help you today?")
-
-    # Switch to normal processing
-    call_mode[call_sid] = "normal"
-    gather = Gather(
-        input="speech",
-        action="/voice/outbound/process",
-        method="POST",
-        timeout=20,
-        speech_timeout="auto"
-    )
-    vr.append(gather)
-    return Response(str(vr), media_type="application/xml")
 
 @app.post("/voice/outbound/process")
 async def process(request: Request):
@@ -161,13 +159,6 @@ async def process(request: Request):
         vr.say(f"Thank you for calling {STORE_INFO['name']}. Goodbye.")
         vr.hangup()
         return Response(str(vr), media_type="application/xml")
-
-    # Name detection
-    if caller_name.get(call_sid) is None:
-        name_match = re.search(r"my name is (\w+)", lower_input)
-        if name_match:
-            caller_name[call_sid] = name_match.group(1).capitalize()
-            vr.say(f"Thanks, {caller_name[call_sid]}.")
 
     # GPS mode step delivery
     if call_mode.get(call_sid) == "gps":
@@ -204,14 +195,13 @@ async def process(request: Request):
                 method="POST",
                 timeout=20,
                 speech_timeout="auto"
-    )
+            )
             vr.append(gather)
             return Response(str(vr), media_type="application/xml")
 
         directions = get_directions(origin_coords, STORE_INFO["address"])
         if directions:
-            name_part = f"{caller_name[call_sid]}, " if caller_name.get(call_sid) else ""
-            vr.say(f"{name_part}It is {directions['distance']} away, about {directions['duration']} drive. Let's start directions.")
+            vr.say(f"It is {directions['distance']} away, about {directions['duration']} drive. Let's start directions.")
             gps_routes[call_sid] = directions["steps"]
             call_mode[call_sid] = "gps"
             vr.say(gps_routes[call_sid].pop(0))
@@ -227,7 +217,7 @@ async def process(request: Request):
             vr.say("I couldn't get directions from that location. Could you try a different starting point?")
             gather = Gather(
                 input="speech",
-                action="/voice/outbound/origin",
+                action="/voice/outbound/process",
                 method="POST",
                 timeout=20,
                 speech_timeout="auto"
@@ -236,7 +226,6 @@ async def process(request: Request):
         return Response(str(vr), media_type="application/xml")
 
     # === Hard-coded store info (order adjusted) ===
-    # Check directions BEFORE address or phone so GPS logic takes priority
     if "directions" in lower_input or "how do i get there" in lower_input:
         vr.say("Sure, what is your starting address or location?")
         call_mode[call_sid] = "awaiting_origin"
@@ -275,9 +264,6 @@ async def process(request: Request):
             You are a warm, knowledgeable receptionist for {STORE_INFO['name']} in {STORE_INFO['city']}.
             You can chat naturally, answer open-ended repair or product questions, but DO NOT guess store details like hours, address, phone, or landmarks.
             """
-            if caller_name.get(call_sid):
-                system_prompt += f" Address the caller by their name: {caller_name[call_sid]}."
-
             messages = [{"role": "system", "content": system_prompt}]
             if call_sid in call_memory:
                 messages.extend(call_memory[call_sid])
