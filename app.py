@@ -236,7 +236,7 @@ async def process(request: Request):
     # === Main store-info intents ===
     if re.search(r"\bhours?\b|\bwhen\s+are\s+you\s+open\b|\bwhat\s+time\s+do\s+you\b", lower_input):
         vr.say(f"Our hours are {STORE_INFO['hours']}.")
-    elif re.search(r"(where\s+(are\s+(you|y'all)|y'all|yall)|is\s+the\s+store)\s+located)|(address)|(location)", lower_input):
+    elif re.search(r"((where\s+(are\s+(you|y['’]all|ya['’]ll|yall)|y['’]all|ya['’]ll|yall)\s+at)|(is\s+the\s+store\s+located)|(address)|(location))", lower_input):
         vr.say(f"We are located at {STORE_INFO['address']}.")
     elif re.search(r"\b(phone|number)\b", lower_input):
         vr.say(f"Our phone number is {STORE_INFO['phone']}.")
