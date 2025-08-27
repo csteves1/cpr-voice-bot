@@ -29,15 +29,15 @@ MAX_MEMORY = 5
 
 # === Helper functions ===
 
-def slow_say(self, text):
-    """Speak slightly slower with a consistent voice everywhere."""
-    self.say(
+def slow_say(self, text, **kwargs):
+    kwargs.setdefault("voice", "Polly.Matthew")
+    self._original_say(
         f'<speak><prosody rate="90%">{text}</prosody></speak>',
-        voice="Polly.Matthew"
+        **kwargs
     )
 
 # Monkey‑patch VoiceResponse.say to always use slow mode
-VoiceResponse.slow_say = slow_say
+VoiceResponse._original_say = VoiceResponse.say
 VoiceResponse.say = slow_say
 
 def remember(call_sid, role, content):
